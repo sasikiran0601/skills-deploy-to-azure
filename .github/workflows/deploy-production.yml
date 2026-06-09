@@ -1,0 +1,30 @@
+name: Deploy to Production
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy-production:
+    runs-on: ubuntu-latest
+    environment: production     # requires manual approval
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{secrets.AWS_ROLE_ARN}}
+          aws-region: us-east-1
+
+      - name: Deploy to S3 production bucket
+        run: |
+          aws s3 sync . s3://${{secrets.PRODUCTION_BUCKET}} --exclude ".git/*" --delete
+
+      - name: Print production URL
+        run: echo "Production → http://${{secrets.PRODUCTION_BUCKET}}.s3-website-us-east-1.amazonaws.com"
