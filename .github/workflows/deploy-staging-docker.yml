@@ -1,0 +1,142 @@
+name: Deploy to Staging
+
+on:
+  pull_request:
+    types: [labeled]
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+
+jobs:
+  build:
+    name: Build app
+    if: contains(github.event.pull_request.labels.*.name, 'stage')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install and build
+        run: |
+          npm install
+          npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webpack-artifacts
+          path: public/
+
+  build-and-push:
+    name: Build and push Docker image to ECR
+    runs-on: ubuntu-latest
+    needs: build
+
+    permissions:
+      id-token: write
+      contents: read
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: webpack-artifacts
+          path: public
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: meta
+        run: echo "tag=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t ${{ steps.meta.outputs.tag }} .
+          docker push ${{ steps.meta.outputs.tag }}
+          docker tag ${{ steps.meta.outputs.tag }} \
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:staging
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:staging
+
+  deploy-staging:
+    name: Deploy to EC2 staging
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: staging
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to EC2 via EC2 Instance Connect
+        run: |
+          # Generate a one-time SSH key pair (never stored in secrets)
+          ssh-keygen -t rsa -f /tmp/ec2_key -N "" -q
+
+          # Push the public key to the instance (valid for 60 seconds)
+          aws ec2-instance-connect send-ssh-public-key \
+            --instance-id ${{ secrets.EC2_INSTANCE_ID }} \
+            --instance-os-user ec2-user \
+            --ssh-public-key file:///tmp/ec2_key.pub \
+            --region ${{ env.AWS_REGION }}
+
+          # Get the public IP of the instance
+          EC2_IP=$(aws ec2 describe-instances \
+            --instance-ids ${{ secrets.EC2_INSTANCE_ID }} \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)
+
+          # SSH in and deploy — using the temporary key
+          ssh -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=30 \
+              -i /tmp/ec2_key \
+              ec2-user@$EC2_IP << 'ENDSSH'
+            # Authenticate Docker to ECR
+            aws ecr get-login-password --region us-east-1 | \
+              docker login --username AWS --password-stdin \
+              ${{ env.ECR_REGISTRY }}
+
+            # Pull latest staging image
+            docker pull ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:staging
+
+            # Stop and remove old container if running
+            docker stop tictactoe-staging 2>/dev/null || true
+            docker rm tictactoe-staging 2>/dev/null || true
+
+            # Run new container
+            docker run -d \
+              --name tictactoe-staging \
+              -p 3000:80 \
+              --restart unless-stopped \
+              ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:staging
+
+            echo "Staging deployed successfully"
+            docker ps
+          ENDSSH
+
+          # Clean up temporary key
+          rm -f /tmp/ec2_key /tmp/ec2_key.pub
