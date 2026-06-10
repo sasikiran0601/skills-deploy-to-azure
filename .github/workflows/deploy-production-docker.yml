@@ -54,7 +54,7 @@ jobs:
     name: Deploy to EC2 production
     runs-on: ubuntu-latest
     needs: build-and-push
-    environment: production   # ← pauses here for manual approval
+    environment: production
 
     permissions:
       id-token: write
@@ -85,7 +85,7 @@ jobs:
           ssh -o StrictHostKeyChecking=no \
               -o ConnectTimeout=30 \
               -i /tmp/ec2_key \
-              ec2-user@$EC2_IP << 'ENDSSH'
+              ubuntu@$EC2_IP << 'ENDSSH'
             aws ecr get-login-password --region us-east-1 | \
               docker login --username AWS --password-stdin \
               ${{ env.ECR_REGISTRY }}
