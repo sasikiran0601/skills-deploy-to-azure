@@ -73,7 +73,7 @@ jobs:
 
           aws ec2-instance-connect send-ssh-public-key \
             --instance-id ${{ secrets.EC2_INSTANCE_ID }} \
-            --instance-os-user ec2-user \
+            --instance-os-user ubuntu \
             --ssh-public-key file:///tmp/ec2_key.pub \
             --region ${{ env.AWS_REGION }}
 
