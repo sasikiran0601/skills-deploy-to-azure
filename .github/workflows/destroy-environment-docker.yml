@@ -1,0 +1,29 @@
+name: Destroy staging environment
+
+on:
+  pull_request:
+    types: [labeled]
+
+jobs:
+  destroy:
+    name: Remove staging image tags from ECR
+    if: contains(github.event.pull_request.labels.*.name, 'destroy environment')
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Delete staging image from ECR
+        run: |
+          aws ecr batch-delete-image \
+            --repository-name ${{ secrets.ECR_REPOSITORY }} \
+            --image-ids imageTag=staging
+          echo "Staging image removed from ECR"
